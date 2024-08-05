@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package values
 
 import (
 	"fmt"
@@ -26,43 +26,55 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
-// GenerateValuesTable produces a table of parameters from a chart values file
-func GenerateValuesTable(from *yaml.RNode) ([][]string, error) {
-	p := printer{
-		rows: [][]string{},
+// GenerateFromValuesFile produces a table of parameters from a chart values file
+func LoadFromValuesFile(content []byte) (List, error) {
+	obj, err := yaml.Parse(string(content))
+	if err != nil {
+		return nil, err
+	}
+
+	return GenerateFromValuesFile(obj)
+}
+
+// GenerateFromValuesFile produces a table of parameters from a chart values file
+func GenerateFromValuesFile(from *yaml.RNode) (List, error) {
+	p := valueFilePrinter{
+		parameters: make(List),
 	}
 	_, err := walk.Walker{
 		Source:             from,
 		Visitor:            &p,
 		VisitKeysAsScalars: true,
 	}.Walk()
-	return p.rows, err
+
+	return p.parameters, err
 }
 
-type printer struct {
-	rows [][]string
+type valueFilePrinter struct {
+	parameters List
 }
 
-func (c *printer) VisitMap(s *yaml.RNode, _ *openapi.ResourceSchema) (*yaml.RNode, error) {
+func (c *valueFilePrinter) VisitMap(s *yaml.RNode, _ *openapi.ResourceSchema) (*yaml.RNode, error) {
 	return s, nil
 }
 
-func (c *printer) VisitScalar(s *yaml.RNode, _ *openapi.ResourceSchema) (*yaml.RNode, error) {
+func (c *valueFilePrinter) VisitScalar(s *yaml.RNode, _ *openapi.ResourceSchema) (*yaml.RNode, error) {
 	return s, nil
 }
 
-func (c *printer) VisitList(s *yaml.RNode, _ *openapi.ResourceSchema, _ walk.ListKind) (*yaml.RNode, error) {
+func (c *valueFilePrinter) VisitList(s *yaml.RNode, _ *openapi.ResourceSchema, _ walk.ListKind) (*yaml.RNode, error) {
 	return s, nil
 }
 
-func (c *printer) VisitLeaf(key *yaml.RNode, value *yaml.RNode, path string, _ *openapi.ResourceSchema) (*yaml.RNode, error) {
+func (c *valueFilePrinter) VisitLeaf(key *yaml.RNode, value *yaml.RNode, path string, _ *openapi.ResourceSchema) (*yaml.RNode, error) {
 	desc, example := ParseComment(key.YNode().HeadComment)
-	c.rows = append(c.rows, []string{
-		path,
-		desc,
-		PrintValue(value),
-		example,
-	})
+	c.parameters[path] = Parameter{
+		Name:        path,
+		Description: desc,
+		Default:     PrintValue(value),
+		Example:     example,
+	}
+
 	return key, nil
 }
 

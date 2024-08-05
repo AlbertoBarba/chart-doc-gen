@@ -18,21 +18,23 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	iofs "io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 
 	"kubepack.dev/chart-doc-gen/api"
 	"kubepack.dev/chart-doc-gen/templates"
+	"kubepack.dev/chart-doc-gen/values"
 
 	"github.com/olekukonko/tablewriter"
 	flag "github.com/spf13/pflag"
 	ylib "k8s.io/apimachinery/pkg/util/yaml"
-	"sigs.k8s.io/kustomize/kyaml/yaml"
 	yaml2 "sigs.k8s.io/yaml"
 )
 
@@ -40,6 +42,7 @@ var (
 	docFile    = flag.StringP("doc", "d", "", "Path to a project's doc.{json|yaml} info file")
 	chartFile  = flag.StringP("chart", "c", "", "Path to Chart.yaml file")
 	valuesFile = flag.StringP("values", "v", "", "Path to chart values file")
+	schemaFile = flag.StringP("schema", "s", "", "Path to values JSON Schema file")
 	tplFile    = flag.StringP("template", "t", "readme2.tpl", "Path to a doc template file")
 )
 
@@ -61,60 +64,65 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	obj, err := yaml.Parse(string(data))
-	if err == nil {
-		rows, err := GenerateValuesTable(obj)
+
+	parameters, err := values.LoadFromValuesFile(data)
+	if err != nil && errors.Is(err, io.EOF) {
+		parameters = values.List{}
+	} else if err != nil {
+		panic(err)
+	}
+
+	if *schemaFile != "" {
+		jsonSchemaData, err := os.ReadFile(*schemaFile)
 		if err != nil {
 			panic(err)
 		}
 
-		var params [][]string
-		for _, row := range rows {
-			params = append(params, []string{
-				row[0],
-				row[1],
-				fmt.Sprintf(
-					"<code>%s</code>", // use a html code block instead of backtics so the whole block get highlighted
-					strings.ReplaceAll( // replace all newlines, they generate new table columns with tablewriter
-						strings.ReplaceAll(row[2], "|", "&#124;"), // replace all pipe symbols with their ACSII representation, because they break the markdown table
-						"\n",
-						"&#13;&#10;",
-					),
-				),
-			})
+		schemaParameters, err := values.LoadFromJSONShema(jsonSchemaData)
+		if err != nil && errors.Is(err, io.EOF) {
+			parameters = values.List{}
+		} else if err != nil {
+			panic(err)
 		}
 
-		var buf bytes.Buffer
-		table := tablewriter.NewWriter(&buf)
-		table.SetHeader([]string{"Parameter", "Description", "Default"})
-		table.SetAutoFormatHeaders(false)
-		table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
-		table.SetAutoWrapText(false)
-		table.SetCenterSeparator("|")
-		table.AppendBulk(params) // Add Bulk Data
-		table.Render()
+		parameters = schemaParameters.Merge(parameters)
+	}
 
-		doc.Chart.Values = buf.String()
+	var params [][]string
+	for _, parameter := range parameters {
+		params = append(params, []string{
+			parameter.Name,
+			parameter.Description,
+			fmt.Sprintf(
+				"<code>%s</code>", // use a html code block instead of backtics so the whole block get highlighted
+				strings.ReplaceAll( // replace all newlines, they generate new table columns with tablewriter
+					strings.ReplaceAll(parameter.Default, "|", "&#124;"), // replace all pipe symbols with their ACSII representation, because they break the markdown table
+					"\n",
+					"&#13;&#10;",
+				),
+			),
+		})
+	}
 
-		if doc.Chart.ValuesExample == "" || strings.HasPrefix(doc.Chart.ValuesExample, "-- generate from values file --") {
-			for _, row := range rows {
-				if row[2] != "" &&
-					row[2] != `""` &&
-					row[2] != "{}" &&
-					row[2] != "[]" &&
-					row[2] != "true" &&
-					row[2] != "false" &&
-					row[2] != "not-ca-cert" {
-					doc.Chart.ValuesExample = fmt.Sprintf("%v=%v", row[0], row[2])
-					break
-				}
+	var buf bytes.Buffer
+	table := tablewriter.NewWriter(&buf)
+	table.SetHeader([]string{"Parameter", "Description", "Default"})
+	table.SetAutoFormatHeaders(false)
+	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
+	table.SetAutoWrapText(false)
+	table.SetCenterSeparator("|")
+	table.AppendBulk(params) // Add Bulk Data
+	table.Render()
+
+	doc.Chart.Values = buf.String()
+
+	if doc.Chart.ValuesExample == "" || strings.HasPrefix(doc.Chart.ValuesExample, "-- generate from values file --") {
+		for _, parameter := range parameters {
+			if !slices.Contains([]string{"", `""`, "{}", "[]", "true", "false", "not-ca-cert"}, parameter.Default) {
+				doc.Chart.ValuesExample = fmt.Sprintf("%v=%v", parameter.Name, parameter.Default)
+				break
 			}
 		}
-	} else if err == io.EOF {
-		doc.Chart.Values = ""
-		doc.Chart.ValuesExample = ""
-	} else {
-		panic(err)
 	}
 
 	{
